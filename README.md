@@ -27,6 +27,10 @@ A zero-dependency Python console app that pulls live NOAA data and renders a ful
 
 ![Station search and results](screenshots/search_example.png)
 
+**Week view — Freeport, TX (`--week`)**
+
+![7-day hi/lo tide table](screenshots/week_view.png)
+
 ---
 
 ## Requirements
@@ -74,8 +78,15 @@ python3 tides.py --id 8771450            # Galveston Channel
 python3 tides.py --date 2026-07-04
 python3 tides.py -p --date 2026-07-04   # both default stations, July 4th
 
+# Show a full week of hi/lo tides (compact table, no chart)
+python3 tides.py --week            # this week (Mon–Sun)
+python3 tides.py --week next       # next week
+python3 tides.py --week last       # last week
+python3 tides.py -w next           # short flag
+
 # Combine flags
 python3 tides.py --search "Mobile" --date 2026-06-15
+python3 tides.py --search "Galveston" --week next
 ```
 
 When run with no flags the script enters interactive mode and prompts for both the date and station.
@@ -90,6 +101,7 @@ When run with no flags the script enters interactive mode and prompts for both t
 | `--search QUERY` | `-s` | Search NOAA stations by city, partial name, or 2-letter state code |
 | `--id STATION_ID` | | Use a NOAA station ID directly — skip the search list |
 | `--date YYYY-MM-DD` | `-d` | Show predictions for a specific date (default: today) |
+| `--week [this\|next\|last]` | `-w` | Show a compact 7-day hi/lo tide table; bare `--week` defaults to this week |
 
 ---
 

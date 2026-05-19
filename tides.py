@@ -7,7 +7,7 @@ import json
 import sys
 import math
 import concurrent.futures
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 # ── ANSI codes ────────────────────────────────────────────────────────────────
 RESET    = "\033[0m";  BOLD    = "\033[1m";  DIM     = "\033[2m"
@@ -40,6 +40,17 @@ CHART_WIDTH  = 72
 CHART_HEIGHT = 20
 
 # ── Timezone ──────────────────────────────────────────────────────────────────
+def week_dates(which: str) -> tuple:
+    """Return (start, end) date for this/next/last week (Mon–Sun)."""
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    if which == "next":
+        monday += timedelta(weeks=1)
+    elif which == "last":
+        monday -= timedelta(weeks=1)
+    return monday, monday + timedelta(days=6)
+
+
 def central_utc_offset(d: date) -> float:
     """Return UTC offset for US Central Time (-5 CDT or -6 CST)."""
     y = d.year
@@ -234,10 +245,11 @@ def _get(url: str, timeout: int = 10, headers: dict = None):
         return None
 
 
-def fetch_predictions(station_id: str, today: str, interval: str) -> list:
+def fetch_predictions(station_id: str, today: str, interval: str, end_date: str = None) -> list:
+    end = end_date or today
     url = (
         "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
-        f"?begin_date={today}&end_date={today}&station={station_id}"
+        f"?begin_date={today}&end_date={end}&station={station_id}"
         "&product=predictions&datum=MLLW&time_zone=lst_ldt"
         f"&interval={interval}&units=english&format=json&application=ansi_tide_chart"
     )
@@ -678,6 +690,48 @@ def draw_chart(name: str, hourly: list, hilo: list, target_date: date = None) ->
     print("\n")
 
 
+# ── Weekly summary ───────────────────────────────────────────────────────────
+def draw_week(name: str, hilo_all: list, start: date, end: date) -> None:
+    """Display a compact 7-day hi/lo tide table."""
+    by_date: dict = {}
+    for p in hilo_all:
+        try:
+            t = datetime.strptime(p["t"], "%Y-%m-%d %H:%M")
+            by_date.setdefault(t.date(), []).append((t, float(p["v"]), p["type"]))
+        except (KeyError, ValueError):
+            pass
+
+    W = 76
+    range_str = f"{start.strftime('%b %d')} – {end.strftime('%b %d, %Y')}"
+    title = f"  Tide Week — {name}  ({range_str})  "
+    print()
+    print(f"{BG_NAVY}{BWHITE}{BOLD}{title:^{W}}{RESET}")
+    print()
+
+    today = date.today()
+    cur = start
+    while cur <= end:
+        phase_name, _, phase_emoji = moon_phase(cur)
+        day_label = cur.strftime("%a %b %d")
+        if cur == today:
+            print(f"  {BGREEN}{BOLD}{day_label}  ◄ TODAY{RESET}  {phase_emoji} {DIM}{phase_name}{RESET}")
+        else:
+            print(f"  {BWHITE}{BOLD}{day_label}{RESET}  {phase_emoji} {DIM}{phase_name}{RESET}")
+
+        events = sorted(by_date.get(cur, []), key=lambda x: x[0])
+        if events:
+            for t, val, typ in events:
+                if typ == "H":
+                    icon = f"{BBLUE}▲ HIGH{RESET}"; col = BCYAN
+                else:
+                    icon = f"{BYELLOW}▼ LOW {RESET}"; col = YELLOW
+                print(f"    {icon}  {BWHITE}{t.strftime('%I:%M %p')}{RESET}  {col}{val:+.2f} ft{RESET}")
+        else:
+            print(f"    {DIM}No data{RESET}")
+        print()
+        cur += timedelta(days=1)
+
+
 # ── Interactive prompts ───────────────────────────────────────────────────────
 def prompt_date() -> date:
     """Interactively prompt for a date; Enter accepts today."""
@@ -722,26 +776,35 @@ def main() -> None:
                         help="use a specific NOAA station ID directly")
     parser.add_argument("--date", "-d", metavar="YYYY-MM-DD",
                         help="date to show tide predictions (default: today)")
+    parser.add_argument("--week", "-w", nargs="?", const="this",
+                        metavar="this|next|last",
+                        help="show full week of hi/lo tides (default: this week)")
     args = parser.parse_args()
 
+    if args.week is not None and args.week not in ("this", "next", "last"):
+        print(f"{RED}--week must be 'this', 'next', or 'last'{RESET}")
+        sys.exit(1)
+
     # fully interactive when no flags at all
-    interactive = not args.id and not args.search and not args.padre and not args.date
+    interactive = (not args.id and not args.search and not args.padre
+                   and not args.date and not args.week)
 
-    # ── Resolve target date ────────────────────────────────────────────────────
-    if args.date:
-        try:
-            target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
-        except ValueError:
-            print(f"{RED}Invalid date '{args.date}' — use YYYY-MM-DD{RESET}")
-            sys.exit(1)
-    elif interactive:
-        target_date = prompt_date()
-    else:
-        target_date = date.today()
+    # ── Resolve target date (single-day mode only) ─────────────────────────────
+    if not args.week:
+        if args.date:
+            try:
+                target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
+            except ValueError:
+                print(f"{RED}Invalid date '{args.date}' — use YYYY-MM-DD{RESET}")
+                sys.exit(1)
+        elif interactive:
+            target_date = prompt_date()
+        else:
+            target_date = date.today()
 
-    is_today  = (target_date == date.today())
-    date_str  = target_date.strftime("%Y%m%d")
-    utc_off   = central_utc_offset(target_date)
+        is_today  = (target_date == date.today())
+        date_str  = target_date.strftime("%Y%m%d")
+        utc_off   = central_utc_offset(target_date)
 
     # ── Resolve station(s) ─────────────────────────────────────────────────────
     if args.id:
@@ -785,6 +848,22 @@ def main() -> None:
         selected = {"Freeport, TX": STATIONS["Freeport, TX"]}
         if args.padre:
             selected["North Padre Island, TX"] = STATIONS["North Padre Island, TX"]
+
+    # ── Week mode ──────────────────────────────────────────────────────────────
+    if args.week is not None:
+        which = args.week or "this"
+        week_start, week_end = week_dates(which)
+        begin_str = week_start.strftime("%Y%m%d")
+        end_str   = week_end.strftime("%Y%m%d")
+
+        for name, cfg in selected.items():
+            sid = cfg["id"]
+            print(f"\n{BCYAN}  Fetching {which}-week tides for {name} (station {sid})…{RESET}")
+            hilo_all = fetch_predictions(sid, begin_str, "hilo", end_date=end_str)
+            draw_week(name, hilo_all, week_start, week_end)
+
+        print(f"{DIM}  Data: NOAA CO-OPS (tidesandcurrents.noaa.gov){RESET}\n")
+        return
 
     # Header
     print(f"\n{BG_NAVY}{BWHITE}{BOLD}{'':^80}{RESET}")
