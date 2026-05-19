@@ -19,13 +19,13 @@ A zero-dependency Python console app that pulls live NOAA data and renders a ful
 
 ## Screenshots
 
-**Default view — Freeport, TX**
+**Default view — Freeport, TX + North Padre Island, TX (`--padre`)**
 
-> Open `screenshots/tides_default.html` in a browser to see the full-colour ANSI output.
+![Freeport and North Padre Island tide dashboard](screenshots/tides_default.png)
 
-**Station search — Galveston area**
+**Station search — Galveston area (`--search "Galveston"`)**
 
-> Open `screenshots/search_example.html` in a browser to see the interactive search flow.
+![Station search and results](screenshots/search_example.png)
 
 ---
 
