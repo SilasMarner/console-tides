@@ -2,6 +2,7 @@
 """ANSI Tide Chart + Conditions Dashboard — Texas Gulf Coast"""
 
 import argparse
+import os
 import urllib.request
 import json
 import sys
@@ -678,6 +679,18 @@ def build_hourly_map(hourly: list) -> dict:
     return hmap
 
 
+def _detect_braille() -> bool:
+    """Return True if the terminal is likely to render braille + ANSI correctly."""
+    if sys.platform != 'win32':
+        return True                          # Linux / macOS: always fine
+    return bool(
+        os.environ.get('WT_SESSION')    or   # Windows Terminal
+        os.environ.get('TERM_PROGRAM')  or   # VS Code, iTerm2 via WSL
+        os.environ.get('TERM')               # Git Bash, MSYS2, Cygwin
+    )
+    # cmd.exe and bare PowerShell set none of the above → returns False
+
+
 # Braille dot-bit map: _BRAILLE_BITS[row][col] for a 4-row × 2-col cell
 _BRAILLE_BITS = (
     (0x01, 0x08),  # row 0 (top):    dot1, dot4
@@ -696,7 +709,8 @@ def _braille(dots: list) -> str:
     return chr(0x2800 + bits)
 
 
-def draw_chart(name: str, hourly: list, hilo: list, target_date: date = None) -> None:
+def draw_chart(name: str, hourly: list, hilo: list, target_date: date = None,
+               braille: bool = True) -> None:
     if target_date is None:
         target_date = date.today()
     is_today = (target_date == date.today())
@@ -726,68 +740,91 @@ def draw_chart(name: str, hourly: list, hilo: list, target_date: date = None) ->
     print(f"{DIM}{WHITE}  {date_str}  (all times local • heights in feet MLLW){RESET}")
     print()
 
-    # ── Braille wave chart ────────────────────────────────────────────────────
-    # Each braille char = 2 px wide × 4 px tall.
-    # Canvas: CHART_WIDTH chars × (CHART_HEIGHT+1) rows → 144×84 pixel grid.
-    ROWS  = CHART_HEIGHT + 1
-    PX_W  = CHART_WIDTH * 2
-    PX_H  = ROWS * 4
     rng   = max_h - min_h if max_h != min_h else 1
-    col_w = CHART_WIDTH // 24  # still needed for x-axis labels below
+    col_w = CHART_WIDTH // 24  # used by both chart modes and x-axis labels
 
-    def interp(fh: float) -> float:
-        """Cosine-interpolated tide height at fractional hour."""
-        h0 = int(fh) % 24
-        h1 = (h0 + 1) % 24
-        t  = fh - int(fh)
-        v0 = hmap.get(h0, min_h)
-        v1 = hmap.get(h1, min_h)
-        mu = (1 - math.cos(t * math.pi)) / 2
-        return v0 * (1 - mu) + v1 * mu
+    if braille:
+        # ── Braille wave chart ────────────────────────────────────────────────
+        # Each braille char = 2 px wide × 4 px tall.
+        # Canvas: CHART_WIDTH chars × (CHART_HEIGHT+1) rows → 144×84 pixel grid.
+        ROWS = CHART_HEIGHT + 1
+        PX_W = CHART_WIDTH * 2
+        PX_H = ROWS * 4
 
-    # Populate filled wave: curve top + solid fill to bottom
-    pixels = [[False] * PX_W for _ in range(PX_H)]
-    for px_c in range(PX_W):
-        h    = interp(px_c / PX_W * 24)
-        px_r = round((max_h - h) / rng * (PX_H - 1))
-        px_r = max(0, min(PX_H - 1, px_r))
-        for fill_r in range(px_r, PX_H):
-            pixels[fill_r][px_c] = True
+        def interp(fh: float) -> float:
+            h0 = int(fh) % 24
+            h1 = (h0 + 1) % 24
+            t  = fh - int(fh)
+            mu = (1 - math.cos(t * math.pi)) / 2
+            return hmap.get(h0, min_h) * (1 - mu) + hmap.get(h1, min_h) * mu
 
-    # Current-time char column
-    now_cc = None
-    if is_today:
-        now_fh = datetime.now().hour + datetime.now().minute / 60
-        now_cc = min(int(now_fh / 24 * CHART_WIDTH), CHART_WIDTH - 1)
+        pixels = [[False] * PX_W for _ in range(PX_H)]
+        for px_c in range(PX_W):
+            h    = interp(px_c / PX_W * 24)
+            px_r = round((max_h - h) / rng * (PX_H - 1))
+            px_r = max(0, min(PX_H - 1, px_r))
+            for fill_r in range(px_r, PX_H):
+                pixels[fill_r][px_c] = True
 
-    for cr in range(ROWS):
-        equiv_row = CHART_HEIGHT - cr           # mirrors original row variable
-        h_label   = min_h + rng * equiv_row / CHART_HEIGHT
-        label = f"{h_label:4.1f}ft" if equiv_row % 4 == 0 else "       "
-        line  = f"{DIM}{WHITE}{label}{RESET} {DIM}│{RESET}"
+        now_cc = None
+        if is_today:
+            now_fh = datetime.now().hour + datetime.now().minute / 60
+            now_cc = min(int(now_fh / 24 * CHART_WIDTH), CHART_WIDTH - 1)
 
-        for cc in range(CHART_WIDTH):
-            dots = [[False, False] for _ in range(4)]
-            for dr in range(4):
-                for dc in range(2):
-                    pr, pc = cr * 4 + dr, cc * 2 + dc
-                    if pr < PX_H:
-                        dots[dr][dc] = pixels[pr][pc]
+        for cr in range(ROWS):
+            equiv_row = CHART_HEIGHT - cr
+            h_label   = min_h + rng * equiv_row / CHART_HEIGHT
+            label = f"{h_label:4.1f}ft" if equiv_row % 4 == 0 else "       "
+            line  = f"{DIM}{WHITE}{label}{RESET} {DIM}│{RESET}"
 
-            ch    = _braille(dots)
-            color = tide_color(interp((cc * 2 + 1) / PX_W * 24), min_h, max_h)
+            for cc in range(CHART_WIDTH):
+                dots = [[False, False] for _ in range(4)]
+                for dr in range(4):
+                    for dc in range(2):
+                        pr, pc = cr * 4 + dr, cc * 2 + dc
+                        if pr < PX_H:
+                            dots[dr][dc] = pixels[pr][pc]
 
-            if cc == now_cc:
-                if ch == chr(0x2800):
-                    line += f"{DIM}│{RESET}"
+                ch    = _braille(dots)
+                color = tide_color(interp((cc * 2 + 1) / PX_W * 24), min_h, max_h)
+
+                if cc == now_cc:
+                    line += f"{BYELLOW}{ch if ch != chr(0x2800) else DIM + '│' + RESET + BYELLOW}{RESET}"
+                elif ch == chr(0x2800):
+                    line += " "
                 else:
-                    line += f"{BYELLOW}{ch}{RESET}"
-            elif ch == chr(0x2800):
-                line += " "
-            else:
-                line += f"{color}{ch}{RESET}"
+                    line += f"{color}{ch}{RESET}"
 
-        print(line)
+            print(line)
+
+    else:
+        # ── Block bar chart (fallback for cmd.exe / legacy terminals) ─────────
+        now_h = datetime.now().hour
+        for row in range(CHART_HEIGHT, -1, -1):
+            h_label = min_h + rng * row / CHART_HEIGHT
+            label   = f"{h_label:4.1f}ft" if row % 4 == 0 else "       "
+            line    = f"{DIM}{WHITE}{label}{RESET} {DIM}│{RESET}"
+            for hour in range(24):
+                h = hmap.get(hour)
+                if h is None:
+                    prev_h = hmap.get(hour - 1); next_h = hmap.get(hour + 1)
+                    h = (prev_h + next_h) / 2 if prev_h and next_h else min_h
+                bar_rows = round((h - min_h) / rng * CHART_HEIGHT)
+                color    = tide_color(h, min_h, max_h)
+                now_mark = is_today and hour == now_h
+                if row <= bar_rows:
+                    if row == bar_rows:
+                        line += f"{color}{BOLD}{'▄' * col_w}{RESET}"
+                    else:
+                        line += f"{color}{'█' * col_w}{RESET}"
+                else:
+                    if now_mark and row == bar_rows + 1:
+                        line += f"{BYELLOW}{'▾' * col_w}{RESET}"
+                    elif row > CHART_HEIGHT - 2:
+                        line += f"{DIM}{BLUE}{'·' * col_w}{RESET}"
+                    else:
+                        line += " " * col_w
+            print(line)
 
     # X-axis
     print(f"       {DIM}└{'─' * CHART_WIDTH}{RESET}")
@@ -828,7 +865,7 @@ def draw_chart(name: str, hourly: list, hilo: list, target_date: date = None) ->
              (GREEN,"Mid-Low"),(YELLOW,"Low")]
     print(f"  {DIM}Legend:{RESET} ", end="")
     for col, lbl in items:
-        print(f"{col}⣿{RESET} {DIM}{lbl}{RESET}  ", end="")
+        print(f"{col}{'⣿' if braille else '█'}{RESET} {DIM}{lbl}{RESET}  ", end="")
     print("\n")
 
 
@@ -933,7 +970,12 @@ def main() -> None:
                         help="show full week of hi/lo tides (default: this week)")
     parser.add_argument("--favorites", "-f", action="store_true",
                         help="pick a station from saved favorites")
+    parser.add_argument("--no-braille", action="store_true",
+                        help="block-character chart instead of braille wave "
+                             "(auto-enabled on cmd.exe)")
     args = parser.parse_args()
+
+    use_braille = _detect_braille() and not args.no_braille
 
     if args.week is not None and args.week not in ("this", "next", "last"):
         print(f"{RED}--week must be 'this', 'next', or 'last'{RESET}")
@@ -1078,7 +1120,7 @@ def main() -> None:
         draw_conditions(name, obs, nws, sol, rise, sset, noon,
                         phase_name, phase_pct, phase_emoji, hilo_events,
                         is_today=is_today)
-        draw_chart(name, hourly, hilo, target_date=target_date)
+        draw_chart(name, hourly, hilo, target_date=target_date, braille=use_braille)
 
     print(f"{DIM}  Data: NOAA CO-OPS (tidesandcurrents.noaa.gov) · NWS (weather.gov){RESET}\n")
 

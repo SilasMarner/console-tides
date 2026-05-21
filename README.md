@@ -38,6 +38,7 @@ A zero-dependency Python console app that pulls live NOAA data and renders a ful
 - Python 3.10+
 - Standard library only — `urllib`, `json`, `math`, `concurrent.futures`, `argparse`
 - A terminal that supports ANSI 256-colour codes (any modern terminal: iTerm2, GNOME Terminal, Windows Terminal, alacritty, Kitty, etc.)
+- **Windows note:** the script auto-detects Windows cmd.exe and bare PowerShell and falls back to a block-bar chart. Windows Terminal, VS Code, Git Bash, and WSL all render the braille wave correctly. Use `--no-braille` to force the fallback manually on any platform.
 
 ---
 
@@ -107,6 +108,7 @@ When run with no flags the script enters interactive mode and prompts for both t
 | `--date YYYY-MM-DD` | `-d` | Show predictions for a specific date (default: today) |
 | `--week [this\|next\|last]` | `-w` | Show a compact 7-day hi/lo tide table; bare `--week` defaults to this week |
 | `--favorites` | `-f` | Pick a station from saved favorites |
+| `--no-braille` | | Force the legacy block-bar chart (auto-set on Windows cmd.exe / bare PowerShell) |
 
 ---
 
