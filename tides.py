@@ -586,6 +586,24 @@ def build_hourly_map(hourly: list) -> dict:
     return hmap
 
 
+# Braille dot-bit map: _BRAILLE_BITS[row][col] for a 4-row × 2-col cell
+_BRAILLE_BITS = (
+    (0x01, 0x08),  # row 0 (top):    dot1, dot4
+    (0x02, 0x10),  # row 1:          dot2, dot5
+    (0x04, 0x20),  # row 2:          dot3, dot6
+    (0x40, 0x80),  # row 3 (bottom): dot7, dot8
+)
+
+def _braille(dots: list) -> str:
+    """Convert a 4-row × 2-col boolean grid to a Unicode braille character."""
+    bits = 0
+    for r in range(4):
+        for c in range(2):
+            if dots[r][c]:
+                bits |= _BRAILLE_BITS[r][c]
+    return chr(0x2800 + bits)
+
+
 def draw_chart(name: str, hourly: list, hilo: list, target_date: date = None) -> None:
     if target_date is None:
         target_date = date.today()
@@ -616,35 +634,67 @@ def draw_chart(name: str, hourly: list, hilo: list, target_date: date = None) ->
     print(f"{DIM}{WHITE}  {date_str}  (all times local • heights in feet MLLW){RESET}")
     print()
 
-    # Chart body
-    col_w = CHART_WIDTH // 24
-    now_h = datetime.now().hour
-    for row in range(CHART_HEIGHT, -1, -1):
-        height_at_row = min_h + (max_h - min_h) * row / CHART_HEIGHT
-        label = f"{height_at_row:4.1f}ft" if row % 4 == 0 else "       "
+    # ── Braille wave chart ────────────────────────────────────────────────────
+    # Each braille char = 2 px wide × 4 px tall.
+    # Canvas: CHART_WIDTH chars × (CHART_HEIGHT+1) rows → 144×84 pixel grid.
+    ROWS  = CHART_HEIGHT + 1
+    PX_W  = CHART_WIDTH * 2
+    PX_H  = ROWS * 4
+    rng   = max_h - min_h if max_h != min_h else 1
+    col_w = CHART_WIDTH // 24  # still needed for x-axis labels below
+
+    def interp(fh: float) -> float:
+        """Cosine-interpolated tide height at fractional hour."""
+        h0 = int(fh) % 24
+        h1 = (h0 + 1) % 24
+        t  = fh - int(fh)
+        v0 = hmap.get(h0, min_h)
+        v1 = hmap.get(h1, min_h)
+        mu = (1 - math.cos(t * math.pi)) / 2
+        return v0 * (1 - mu) + v1 * mu
+
+    # Populate filled wave: curve top + solid fill to bottom
+    pixels = [[False] * PX_W for _ in range(PX_H)]
+    for px_c in range(PX_W):
+        h    = interp(px_c / PX_W * 24)
+        px_r = round((max_h - h) / rng * (PX_H - 1))
+        px_r = max(0, min(PX_H - 1, px_r))
+        for fill_r in range(px_r, PX_H):
+            pixels[fill_r][px_c] = True
+
+    # Current-time char column
+    now_cc = None
+    if is_today:
+        now_fh = datetime.now().hour + datetime.now().minute / 60
+        now_cc = min(int(now_fh / 24 * CHART_WIDTH), CHART_WIDTH - 1)
+
+    for cr in range(ROWS):
+        equiv_row = CHART_HEIGHT - cr           # mirrors original row variable
+        h_label   = min_h + rng * equiv_row / CHART_HEIGHT
+        label = f"{h_label:4.1f}ft" if equiv_row % 4 == 0 else "       "
         line  = f"{DIM}{WHITE}{label}{RESET} {DIM}│{RESET}"
-        for hour in range(24):
-            h = hmap.get(hour)
-            if h is None:
-                prev_h = hmap.get(hour - 1); next_h = hmap.get(hour + 1)
-                h = (prev_h + next_h) / 2 if prev_h and next_h else min_h
-            bar_rows = round((h - min_h) / (max_h - min_h) * CHART_HEIGHT)
-            color    = tide_color(h, min_h, max_h)
-            now_mark = is_today and hour == now_h
-            if row <= bar_rows:
-                if row == bar_rows:
-                    ch = "▄" * col_w
-                    line += f"{color}{BOLD}{ch}{RESET}"
+
+        for cc in range(CHART_WIDTH):
+            dots = [[False, False] for _ in range(4)]
+            for dr in range(4):
+                for dc in range(2):
+                    pr, pc = cr * 4 + dr, cc * 2 + dc
+                    if pr < PX_H:
+                        dots[dr][dc] = pixels[pr][pc]
+
+            ch    = _braille(dots)
+            color = tide_color(interp((cc * 2 + 1) / PX_W * 24), min_h, max_h)
+
+            if cc == now_cc:
+                if ch == chr(0x2800):
+                    line += f"{DIM}│{RESET}"
                 else:
-                    ch = "█" * col_w
-                    line += f"{color}{ch}{RESET}"
+                    line += f"{BYELLOW}{ch}{RESET}"
+            elif ch == chr(0x2800):
+                line += " "
             else:
-                if now_mark and row == bar_rows + 1:
-                    line += f"{BYELLOW}{'▾' * col_w}{RESET}"
-                elif row > CHART_HEIGHT - 2:
-                    line += f"{DIM}{BLUE}{'·' * col_w}{RESET}"
-                else:
-                    line += " " * col_w
+                line += f"{color}{ch}{RESET}"
+
         print(line)
 
     # X-axis
@@ -686,7 +736,7 @@ def draw_chart(name: str, hourly: list, hilo: list, target_date: date = None) ->
              (GREEN,"Mid-Low"),(YELLOW,"Low")]
     print(f"  {DIM}Legend:{RESET} ", end="")
     for col, lbl in items:
-        print(f"{col}█{RESET} {DIM}{lbl}{RESET}  ", end="")
+        print(f"{col}⣿{RESET} {DIM}{lbl}{RESET}  ", end="")
     print("\n")
 
 
