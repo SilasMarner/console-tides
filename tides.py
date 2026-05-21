@@ -8,6 +8,7 @@ import sys
 import math
 import concurrent.futures
 from datetime import datetime, date, timedelta
+from pathlib import Path
 
 # ── ANSI codes ────────────────────────────────────────────────────────────────
 RESET    = "\033[0m";  BOLD    = "\033[1m";  DIM     = "\033[2m"
@@ -233,6 +234,97 @@ def pick_station(query: str) -> dict | None:
     except ValueError:
         print(f"{RED}Invalid selection.{RESET}")
         return None
+
+
+# ── Favorites ────────────────────────────────────────────────────────────────
+def _fav_path() -> Path:
+    d = Path.home() / ".config" / "tides"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "favorites.json"
+
+
+def load_favorites() -> list:
+    try:
+        return json.loads(_fav_path().read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save_favorites(favs: list) -> None:
+    _fav_path().write_text(json.dumps(favs, indent=2))
+
+
+def prompt_save_favorite(station: dict) -> None:
+    """Offer to add station to favorites; silently skips if already saved."""
+    favs = load_favorites()
+    if any(f["id"] == station["id"] for f in favs):
+        print(f"  {DIM}({station['name']} is already in favorites){RESET}")
+        return
+    try:
+        ans = input(f"\n  {BYELLOW}Add {station['name']} to favorites? [y/N]: {RESET}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print(); return
+    if ans in ("y", "yes"):
+        favs.append({"id": station["id"], "name": station["name"],
+                     "lat": station["lat"], "lon": station["lon"]})
+        save_favorites(favs)
+        print(f"  {BGREEN}Saved  →  {_fav_path()}{RESET}")
+
+
+def _remove_favorite_prompt(favs: list) -> None:
+    print()
+    for i, f in enumerate(favs, 1):
+        print(f"  {BWHITE}{i:2}.{RESET} {f['name']}  {DIM}({f['id']}){RESET}")
+    try:
+        choice = input(f"\n{BYELLOW}  Remove number (or q to cancel): {RESET}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print(); return
+    if choice in ("q", "quit", ""):
+        return
+    try:
+        idx = int(choice) - 1
+        if not (0 <= idx < len(favs)):
+            raise ValueError
+        removed = favs.pop(idx)
+        save_favorites(favs)
+        print(f"  {BGREEN}Removed: {removed['name']}{RESET}")
+    except ValueError:
+        print(f"  {RED}Invalid selection.{RESET}")
+
+
+def pick_favorite() -> dict | None:
+    """Show saved favorites; return chosen station dict or None."""
+    while True:
+        favs = load_favorites()
+        if not favs:
+            print(f"\n  {YELLOW}No favorites saved yet.")
+            print(f"  {DIM}Use --search or --id to find a station, then save it.{RESET}")
+            return None
+
+        print(f"\n{BG_DARK_BLUE}{BWHITE}{BOLD}  Saved Favorites  {RESET}\n")
+        for i, f in enumerate(favs, 1):
+            print(f"  {BWHITE}{i:2}.{RESET} {f['name']}  {DIM}({f['id']}){RESET}")
+        print(f"\n  {DIM}r = remove a favorite  ·  q = quit{RESET}")
+
+        try:
+            choice = input(f"\n{BYELLOW}  Select: {RESET}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(); return None
+
+        if choice in ("q", "quit", ""):
+            return None
+        if choice == "r":
+            _remove_favorite_prompt(favs)
+            continue
+        try:
+            idx = int(choice) - 1
+            if not (0 <= idx < len(favs)):
+                raise ValueError
+            fav = favs[idx]
+            return {"id": fav["id"], "name": fav["name"],
+                    "lat": fav["lat"], "lon": fav["lon"]}
+        except ValueError:
+            print(f"  {RED}Invalid — enter a number, 'r', or 'q'{RESET}")
 
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
@@ -803,16 +895,26 @@ def prompt_date() -> date:
 
 
 def prompt_station() -> dict | None:
-    """Interactively prompt for a station search; Enter uses Freeport TX default."""
+    """Interactively prompt for a station; offers favorites shortcut if any are saved."""
+    favs = load_favorites()
     print(f"\n{BG_DARK_BLUE}{BWHITE}{BOLD}  Station Search  {RESET}")
-    print(f"  {DIM}Search NOAA stations by city or name — press Enter for Freeport TX:{RESET}")
+    if favs:
+        preview = ", ".join(f["name"].split(",")[0] for f in favs[:3])
+        more    = f" +{len(favs)-3} more" if len(favs) > 3 else ""
+        print(f"  {DIM}Favorites: {preview}{more} — type 'f' to pick{RESET}")
+    print(f"  {DIM}Search by city/name, or press Enter for Freeport TX:{RESET}")
     try:
         query = input(f"  {BYELLOW}Search: {RESET}").strip()
     except (EOFError, KeyboardInterrupt):
         print(); return None
     if not query:
-        return None  # caller uses default
-    return pick_station(query)
+        return None
+    if query.lower() == "f":
+        return pick_favorite() if favs else None
+    station = pick_station(query)
+    if station and sys.stdin.isatty():
+        prompt_save_favorite(station)
+    return station
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -829,6 +931,8 @@ def main() -> None:
     parser.add_argument("--week", "-w", nargs="?", const="this",
                         metavar="this|next|last",
                         help="show full week of hi/lo tides (default: this week)")
+    parser.add_argument("--favorites", "-f", action="store_true",
+                        help="pick a station from saved favorites")
     args = parser.parse_args()
 
     if args.week is not None and args.week not in ("this", "next", "last"):
@@ -837,7 +941,7 @@ def main() -> None:
 
     # fully interactive when no flags at all
     interactive = (not args.id and not args.search and not args.padre
-                   and not args.date and not args.week)
+                   and not args.date and not args.week and not args.favorites)
 
     # ── Resolve target date (single-day mode only) ─────────────────────────────
     if not args.week:
@@ -871,10 +975,26 @@ def main() -> None:
             "met_id": info["id"],
             "nws":    f"https://api.weather.gov/points/{info['lat']},{info['lon']}",
         }}
+        if sys.stdin.isatty():
+            prompt_save_favorite({"id": info["id"], "name": info["name"],
+                                  "lat": info["lat"], "lon": info["lon"]})
     elif args.search:
         station = pick_station(args.search)
         if not station:
             sys.exit(1)
+        selected = {station["name"]: {
+            "id":     station["id"],
+            "lat":    station["lat"],
+            "lon":    station["lon"],
+            "met_id": station["id"],
+            "nws":    f"https://api.weather.gov/points/{station['lat']},{station['lon']}",
+        }}
+        if sys.stdin.isatty():
+            prompt_save_favorite(station)
+    elif args.favorites:
+        station = pick_favorite()
+        if not station:
+            sys.exit(0)
         selected = {station["name"]: {
             "id":     station["id"],
             "lat":    station["lat"],
