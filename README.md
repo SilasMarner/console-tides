@@ -84,6 +84,10 @@ python3 tides.py --week next       # next week
 python3 tides.py --week last       # last week
 python3 tides.py -w next           # short flag
 
+# Pick a saved favorite station
+python3 tides.py --favorites       # or -f
+python3 tides.py -f --week next    # combine with any other flag
+
 # Combine flags
 python3 tides.py --search "Mobile" --date 2026-06-15
 python3 tides.py --search "Galveston" --week next
@@ -102,6 +106,65 @@ When run with no flags the script enters interactive mode and prompts for both t
 | `--id STATION_ID` | | Use a NOAA station ID directly — skip the search list |
 | `--date YYYY-MM-DD` | `-d` | Show predictions for a specific date (default: today) |
 | `--week [this\|next\|last]` | `-w` | Show a compact 7-day hi/lo tide table; bare `--week` defaults to this week |
+| `--favorites` | `-f` | Pick a station from saved favorites |
+
+---
+
+## Favorites
+
+Frequently used stations can be saved and recalled without searching each time.
+
+### Saving a favorite
+
+After using `--search` or `--id`, the script prompts to save the station if stdin is a terminal:
+
+```
+  Matched: Galveston Pier 21, TX  (8771450)
+
+  Add Galveston Pier 21, TX to favorites? [y/N]: y
+  Saved  →  /home/you/.config/tides/favorites.json
+```
+
+The prompt is skipped silently if the station is already saved, and skipped entirely when output is piped.
+
+### Using favorites
+
+```bash
+python3 tides.py --favorites        # numbered picker
+python3 tides.py -f                 # short flag
+python3 tides.py -f --week next     # pick favorite, show next week
+python3 tides.py -f --date 2026-07-04
+```
+
+In fully interactive mode (no flags), type `f` at the station search prompt — saved names are shown as a preview:
+
+```
+  Station Search
+  Favorites: Galveston, Port Bolivar +1 more — type 'f' to pick
+  Search by city/name, or press Enter for Freeport TX:
+  Search: f
+```
+
+### Removing a favorite
+
+From the `--favorites` picker, type `r` to enter remove mode, then select the number to delete.
+
+### Storage
+
+Favorites are stored as plain JSON at `~/.config/tides/favorites.json` — human-readable and hand-editable. Each entry is minimal:
+
+```json
+[
+  {
+    "id": "8771450",
+    "name": "Galveston Pier 21, TX",
+    "lat": 29.31,
+    "lon": -94.793
+  }
+]
+```
+
+The file is created automatically on first save. No additional dependencies required.
 
 ---
 
