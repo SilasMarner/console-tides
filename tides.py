@@ -415,12 +415,13 @@ def fetch_all_obs(tide_id: str, met_id: str) -> dict:
     Water temp and water level come from the tide station itself.
     """
     results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
         futures = {
             ex.submit(fetch_obs, met_id,  "air_temperature"):   "air_temperature",
             ex.submit(fetch_obs, met_id,  "wind"):               "wind",
             ex.submit(fetch_obs, met_id,  "air_pressure"):       "air_pressure",
-            ex.submit(fetch_obs, met_id,  "water_temperature"):  "water_temperature",
+            ex.submit(fetch_obs, tide_id, "water_temperature"):  "water_temperature",
+            ex.submit(fetch_obs, tide_id, "salinity"):           "salinity",
             ex.submit(fetch_water_level_obs, tide_id):           "water_level",
         }
         for fut, prod in futures.items():
@@ -541,7 +542,7 @@ def draw_conditions(name: str, obs: dict, nws, sol: dict,
     # ── Weather row ───────────────────────────────────────────────────────────
     air_t  = ov("air_temperature");   wtr_t  = ov("water_temperature")
     wspd   = ov("wind", "s");          wdir   = ov("wind", "d");  wgst = ov("wind", "g")
-    pres   = ov("air_pressure")
+    pres   = ov("air_pressure");       sal    = ov("salinity")
     wlev   = ov("water_level")
 
     # Air / water temp
@@ -569,6 +570,14 @@ def draw_conditions(name: str, obs: dict, nws, sol: dict,
     except (TypeError, ValueError):
         wind_str = f"{DIM}N/A{RESET}"
 
+    # Salinity
+    try:
+        s = float(sal)
+        sal_str = f"{s:.1f} ppt"
+        sal_col = BCYAN if s > 30 else (BYELLOW if s > 15 else DIM)
+    except (TypeError, ValueError):
+        sal_str = None; sal_col = DIM
+
     # Pressure
     try:
         p = float(pres)
@@ -585,8 +594,10 @@ def draw_conditions(name: str, obs: dict, nws, sol: dict,
     except (TypeError, ValueError):
         wl_str = f"{DIM}N/A{RESET}"
 
+    sal_part = f"    {BOLD}Salinity{RESET}  {sal_col}{sal_str}{RESET}" if sal_str else ""
     print(f"  {BOLD}Air{RESET}  {at_col}{at_str}{RESET}    "
-          f"{BOLD}Water{RESET}  {wt_col}{wt_str}{RESET}    "
+          f"{BOLD}Water{RESET}  {wt_col}{wt_str}{RESET}"
+          f"{sal_part}    "
           f"{BOLD}Pressure{RESET}  {pres_str}    "
           f"{BOLD}Level{RESET}  {wl_str}")
     print(f"  {BOLD}Wind{RESET}  {wind_str}")
