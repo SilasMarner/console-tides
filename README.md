@@ -1,6 +1,6 @@
 # console-tides
 
-A zero-dependency Python console app that pulls live NOAA data and renders a full-colour tide chart + conditions dashboard directly in your terminal. No browser needed — just a Python 3 install.
+A zero-dependency Python console app that pulls live NOAA and NDBC data and renders a full-colour tide chart + conditions dashboard directly in your terminal. No browser needed — just a Python 3 install.
 
 ---
 
@@ -8,12 +8,13 @@ A zero-dependency Python console app that pulls live NOAA data and renders a ful
 
 | Section | Details |
 |---|---|
-| **Conditions** | Air & water temp, wind speed/direction/gusts, Beaufort description, barometric pressure, observed water level |
-| **NWS weather** | Current hourly forecast + 2-period outlook from National Weather Service |
+| **Conditions** | Air & water temp, wind speed/direction/gusts, Beaufort description, barometric pressure, observed water level, **salinity** (when sensor is available) |
+| **NDBC wave data** | Wave height, dominant period, direction; swell height/period/direction and wind-sea breakdown from the nearest offshore buoy (up to 150 miles) |
+| **NWS weather** | Current hourly forecast + 2-period outlook from National Weather Service — works for coastal and offshore stations via coordinate fallback |
 | **Sun & Moon** | Sunrise, solar noon, sunset, golden hour, moon phase + illumination |
 | **Solunar periods** | Major (2-hour) and minor (1-hour) feeding windows; live "◀ NOW" marker during active periods |
 | **Fishing rating** | 1–5 star rating calculated from tide stage, wind speed, and solunar alignment |
-| **Tide chart** | 24-hour ANSI bar chart with colour-coded water height, current-hour marker, and hi/lo table |
+| **Tide chart** | 24-hour braille wave chart with colour-coded water height, current-time marker, and hi/lo table |
 
 ---
 
@@ -36,7 +37,7 @@ A zero-dependency Python console app that pulls live NOAA data and renders a ful
 ## Requirements
 
 - Python 3.10+
-- Standard library only — `urllib`, `json`, `math`, `concurrent.futures`, `argparse`
+- Standard library only — `urllib`, `json`, `math`, `time`, `concurrent.futures`, `argparse`
 - A terminal that supports ANSI 256-colour codes (any modern terminal: iTerm2, GNOME Terminal, Windows Terminal, alacritty, Kitty, etc.)
 - **Windows note:** the script auto-detects Windows cmd.exe and bare PowerShell and falls back to a block-bar chart. Windows Terminal, VS Code, Git Bash, and WSL all render the braille wave correctly. Use `--no-braille` to force the fallback manually on any platform.
 
@@ -175,21 +176,18 @@ The file is created automatically on first save. No additional dependencies requ
 The default stations are defined in the `STATIONS` dictionary near the top of `tides.py`. Edit this block to add any NOAA stations you care about:
 
 ```python
-# ── Station config ────────────────────────────────────────────────────────────
 STATIONS = {
     "Freeport, TX": {
         "id":     "8772440",   # NOAA station ID
-        "lat":    28.9543,     # latitude  (used for sun/solunar math)
-        "lon":    -95.3677,    # longitude (used for sun/solunar math)
+        "lat":    28.9543,     # latitude  (used for sun/solunar math + NWS lookup)
+        "lon":    -95.3677,    # longitude (used for sun/solunar math + NWS lookup)
         "met_id": "8771341",   # nearest full met station (wind, air temp, pressure)
-        "nws":    "https://api.weather.gov/points/28.9543,-95.3677",
     },
     "North Padre Island, TX": {
         "id":     "8775792",
         "lat":    27.5800,
         "lon":    -97.2270,
         "met_id": "8775241",   # Aransas Pass
-        "nws":    "https://api.weather.gov/points/27.5800,-97.2270",
     },
 }
 ```
@@ -217,20 +215,7 @@ The `met_id` supplies wind, air temperature, and barometric pressure. Tide-only 
 
 If you can't find one nearby, set `"met_id"` to the same value as `"id"` — conditions will show `N/A` for met fields but the tide chart will still work.
 
-### Step 3 — Build the NWS URL
-
-The `nws` key points to the National Weather Service grid lookup endpoint. Replace the lat/lon in the URL with your station's coordinates:
-
-```
-https://api.weather.gov/points/<lat>,<lon>
-```
-
-Example for Port Isabel, TX (lat 26.0637, lon -97.2069):
-```
-https://api.weather.gov/points/26.0637,-97.2069
-```
-
-### Step 4 — Add the entry
+### Step 3 — Add the entry
 
 Paste a new block into `STATIONS`:
 
@@ -239,30 +224,16 @@ STATIONS = {
     "Freeport, TX": { ... },          # existing entries
     "North Padre Island, TX": { ... },
 
-    # ── NEW ──────────────────────────────────────────────────────────
     "Port Isabel, TX": {
         "id":     "8779770",
         "lat":    26.0637,
         "lon":    -97.2069,
         "met_id": "8779770",   # same station if no nearby met station
-        "nws":    "https://api.weather.gov/points/26.0637,-97.2069",
     },
 }
 ```
 
-### Step 5 — Use your new default
-
-Now run with `--padre` style control. To display all entries in `STATIONS`, change the default selection block at the bottom of `main()`:
-
-```python
-# Around line 785 — change from:
-selected = {"Freeport, TX": STATIONS["Freeport, TX"]}
-
-# To (show all your configured defaults):
-selected = dict(STATIONS)
-```
-
-Or add a new flag like `--all` if you want both behaviors available.
+NWS weather and NDBC wave data are looked up automatically from the station's `lat`/`lon` — no URL to configure.
 
 ---
 
@@ -274,7 +245,9 @@ Or add a new flag like `--all` if you want both behaviors available.
 | Water level | NOAA CO-OPS — `product=water_level` (live observation vs. prediction) |
 | Wind / air temp / pressure | NOAA CO-OPS — `product=wind`, `air_temperature`, `air_pressure` |
 | Water temperature | NOAA CO-OPS — `product=water_temperature` |
-| Weather forecast | NWS `api.weather.gov` — hourly + 2-period outlook |
+| Salinity | NOAA CO-OPS — `product=salinity` (shown when sensor is available) |
+| Wave data | NDBC `latest_obs.txt` — nearest buoy within 150 miles; `.spec` file for swell/wind-sea breakdown |
+| Weather forecast | NWS `api.weather.gov` — hourly + 2-period outlook; tries 7 coordinate offsets for offshore stations |
 | Sun times | Calculated on-device (solar declination + equation of time) |
 | Moon phase | Calculated on-device (Julian date + synodic period) |
 | Solunar periods | Calculated on-device (moon RA + GMST) |
@@ -286,10 +259,11 @@ All fetches run in parallel via `concurrent.futures.ThreadPoolExecutor` — star
 
 ## Data sources
 
-- **NOAA CO-OPS** — [tidesandcurrents.noaa.gov](https://tidesandcurrents.noaa.gov)  
+- **NOAA CO-OPS** — [tidesandcurrents.noaa.gov](https://tidesandcurrents.noaa.gov)
+- **NDBC** (National Data Buoy Center) — [ndbc.noaa.gov](https://www.ndbc.noaa.gov)
 - **National Weather Service** — [weather.gov](https://weather.gov)
 
-Both APIs are free and require no API key.
+All APIs are free and require no API key.
 
 ---
 
