@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import time
 import urllib.request
 import json
 import sys
@@ -10,6 +11,8 @@ import math
 import concurrent.futures
 from datetime import datetime, date, timedelta
 from pathlib import Path
+
+_VERSION = "2.1.0"
 
 # ── ANSI codes ────────────────────────────────────────────────────────────────
 RESET    = "\033[0m";  BOLD    = "\033[1m";  DIM     = "\033[2m"
@@ -338,6 +341,108 @@ def _get(url: str, timeout: int = 10, headers: dict = None):
         return None
 
 
+def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return distance in miles between two lat/lon points."""
+    R = 3958.8
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+         * math.sin(dlon / 2) ** 2)
+    return R * 2 * math.asin(math.sqrt(a))
+
+
+# ── NDBC wave data ────────────────────────────────────────────────────────────
+_NDBC_OBS_CACHE: list = []
+_NDBC_OBS_TIME:  float = 0.0
+_NDBC_OBS_TTL   = 1800  # 30-minute cache
+
+
+def _fetch_ndbc_obs() -> list:
+    """Fetch NDBC latest_obs.txt; cached for 30 minutes."""
+    global _NDBC_OBS_CACHE, _NDBC_OBS_TIME
+    now = time.monotonic()
+    if _NDBC_OBS_CACHE and (now - _NDBC_OBS_TIME) < _NDBC_OBS_TTL:
+        return _NDBC_OBS_CACHE
+    url = "https://www.ndbc.noaa.gov/data/latest_obs/latest_obs.txt"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "tides-cli/2.1"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            lines = r.read().decode("latin-1").splitlines()
+    except Exception:
+        return _NDBC_OBS_CACHE
+    rows = [l.split() for l in lines if l and not l.startswith("#")]
+    _NDBC_OBS_CACHE = rows
+    _NDBC_OBS_TIME  = now
+    return rows
+
+
+def _mm(s: str):
+    """Parse a float from an NDBC field; return None for missing values."""
+    try:
+        v = float(s)
+        return None if v in (999.0, 9999.0, 99.0, 99.00) else v
+    except (ValueError, TypeError):
+        return None
+
+
+def fetch_ndbc_waves(lat: float, lon: float) -> dict | None:
+    """Find nearest NDBC buoy within 150 mi; return wave dict or None."""
+    rows = _fetch_ndbc_obs()
+    best_dist = 151.0
+    best_row  = None
+    best_stn  = None
+    for cols in rows:
+        if len(cols) < 15:
+            continue
+        try:
+            blat = float(cols[1]); blon = float(cols[2])
+        except (ValueError, IndexError):
+            continue
+        d = haversine(lat, lon, blat, blon)
+        if d < best_dist:
+            best_dist = d; best_row = cols; best_stn = cols[0]
+    if best_row is None:
+        return None
+
+    wvht = _mm(best_row[11]) if len(best_row) > 11 else None
+    dpd  = _mm(best_row[12]) if len(best_row) > 12 else None
+    mwd_raw = best_row[14] if len(best_row) > 14 else "MM"
+    mwd  = _mm(mwd_raw)
+    mwd_str = wind_dir_arrow(mwd) if mwd is not None else None
+
+    # Fetch .spec for swell / wind-sea breakdown
+    swh = swp = swdir = wwh = wwp = None
+    try:
+        spec_url = f"https://www.ndbc.noaa.gov/data/realtime2/{best_stn}.spec"
+        req = urllib.request.Request(spec_url, headers={"User-Agent": "tides-cli/2.1"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            spec_lines = r.read().decode("latin-1").splitlines()
+        data_lines = [l for l in spec_lines if l and not l.startswith("#")]
+        if data_lines:
+            sc = data_lines[0].split()
+            swh  = _mm(sc[6])  if len(sc) > 6  else None
+            swp  = _mm(sc[7])  if len(sc) > 7  else None
+            wwh  = _mm(sc[8])  if len(sc) > 8  else None
+            wwp  = _mm(sc[9])  if len(sc) > 9  else None
+            swdir = sc[10] if len(sc) > 10 and sc[10] != "MM" else None
+    except Exception:
+        pass
+
+    return {
+        "station": best_stn,
+        "dist_mi": round(best_dist, 1),
+        "wvht":    wvht,
+        "dpd":     dpd,
+        "mwd":     mwd_str,
+        "swh":     swh,
+        "swp":     swp,
+        "swdir":   swdir,
+        "wwh":     wwh,
+        "wwp":     wwp,
+    }
+
+
 def fetch_predictions(station_id: str, today: str, interval: str, end_date: str = None) -> list:
     end = end_date or today
     url = (
@@ -389,13 +494,13 @@ def fetch_water_level_obs(station_id: str):
         return None
 
 
-def fetch_nws(points_url: str) -> dict | None:
-    """Fetch current NWS conditions and short-range forecast."""
-    hdr = {"User-Agent": "tides-cli/1.0 (texas-gulf-coast-fishing-dashboard)"}
-    pts = _get(points_url, timeout=8, headers=hdr)
+def _try_nws_fetch(lat: float, lon: float, hdr: dict) -> dict | None:
+    """Try a single NWS grid-point lookup; return data dict or None."""
+    pts = _get(f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}",
+               timeout=8, headers=hdr)
     if not pts:
         return None
-    hourly_url = pts.get("properties", {}).get("forecastHourly")
+    hourly_url   = pts.get("properties", {}).get("forecastHourly")
     forecast_url = pts.get("properties", {}).get("forecast")
     result = {}
     if hourly_url:
@@ -407,6 +512,20 @@ def fetch_nws(points_url: str) -> dict | None:
         if fc:
             result["forecast"] = fc.get("properties", {}).get("periods", [])[:2]
     return result or None
+
+
+def fetch_nws(lat: float, lon: float) -> dict | None:
+    """Fetch NWS conditions and forecast; tries coordinate offsets for offshore stations."""
+    hdr = {"User-Agent": "tides-cli/2.1 (texas-gulf-coast-fishing-dashboard)"}
+    offsets = [
+        (0.0, 0.0), (0.06, 0.0), (-0.06, 0.0),
+        (0.0, 0.06), (0.0, -0.06), (0.06, 0.06), (-0.06, -0.06),
+    ]
+    for dlat, dlon in offsets:
+        result = _try_nws_fetch(lat + dlat, lon + dlon, hdr)
+        if result is not None:
+            return result
+    return None
 
 
 def fetch_all_obs(tide_id: str, met_id: str) -> dict:
@@ -523,7 +642,8 @@ def box_line(content: str, width: int = 74) -> str:
 def draw_conditions(name: str, obs: dict, nws, sol: dict,
                     sunrise: float, sunset: float, solar_noon: float,
                     phase_name: str, phase_pct: int, phase_emoji: str,
-                    hilo_events: list, is_today: bool = True) -> None:
+                    hilo_events: list, is_today: bool = True,
+                    waves: dict = None) -> None:
     W = 74  # total inner width
     stars, rating_label, r_color = fishing_rating(hilo_events, obs, sol)
 
@@ -622,6 +742,33 @@ def draw_conditions(name: str, obs: dict, nws, sol: dict,
                 pname = period.get("name", "")
                 pdetail = period.get("detailedForecast", "")[:80]
                 print(f"  {DIM}  {pname}: {pdetail}{RESET}")
+
+    # ── NDBC wave data ────────────────────────────────────────────────────────
+    if waves:
+        def _ft(m):
+            return f"{m * 3.28084:.1f} ft" if m is not None else "N/A"
+        wvht_s = _ft(waves.get("wvht"))
+        dpd_s  = f"{waves['dpd']:.0f}s" if waves.get("dpd") is not None else "N/A"
+        mwd_s  = waves.get("mwd") or "N/A"
+        stn_s  = f"NDBC {waves['station']}  {DIM}{waves['dist_mi']:.0f} mi away{RESET}"
+        print(f"  {BOLD}Waves{RESET}  {BCYAN}{wvht_s}{RESET}   "
+              f"{BOLD}Period{RESET}  {dpd_s}   "
+              f"{BOLD}Dir{RESET}  {mwd_s}   "
+              f"{DIM}{stn_s}")
+        swh = waves.get("swh"); swp = waves.get("swp"); swdir = waves.get("swdir")
+        wwh = waves.get("wwh"); wwp = waves.get("wwp")
+        parts = []
+        if swh is not None:
+            s = f"{BOLD}Swell{RESET}  {BCYAN}{_ft(swh)}{RESET}"
+            if swp:  s += f"  {swp:.0f}s"
+            if swdir: s += f"  {swdir}"
+            parts.append(s)
+        if wwh is not None:
+            s = f"{BOLD}Wind sea{RESET}  {BCYAN}{_ft(wwh)}{RESET}"
+            if wwp:  s += f"  {wwp:.0f}s"
+            parts.append(s)
+        if parts:
+            print("  " + "   ".join(parts))
 
     print()
 
@@ -1101,17 +1248,19 @@ def main() -> None:
 
         print(f"\n{BCYAN}  Fetching data for {name} (station {sid})…{RESET}")
 
-        # Parallel fetch: tides + observations + NWS
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+        # Parallel fetch: tides + observations + NWS + NDBC waves
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
             f_hourly = ex.submit(fetch_predictions, sid, date_str, "h")
             f_hilo   = ex.submit(fetch_predictions, sid, date_str, "hilo")
             f_obs    = ex.submit(fetch_all_obs, sid, cfg["met_id"])
-            f_nws    = ex.submit(fetch_nws, cfg["nws"])
+            f_nws    = ex.submit(fetch_nws, lat, lon)
+            f_waves  = ex.submit(fetch_ndbc_waves, lat, lon)
 
         hourly = f_hourly.result()
         hilo   = f_hilo.result()
         obs    = f_obs.result()
         nws    = f_nws.result()
+        waves  = f_waves.result()
 
         # Astronomy
         rise, sset, noon = sun_times(target_date, lat, lon, utc_off)
@@ -1130,7 +1279,7 @@ def main() -> None:
 
         draw_conditions(name, obs, nws, sol, rise, sset, noon,
                         phase_name, phase_pct, phase_emoji, hilo_events,
-                        is_today=is_today)
+                        is_today=is_today, waves=waves)
         draw_chart(name, hourly, hilo, target_date=target_date, braille=use_braille)
 
     print(f"{DIM}  Data: NOAA CO-OPS (tidesandcurrents.noaa.gov) · NWS (weather.gov){RESET}\n")
